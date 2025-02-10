@@ -14,6 +14,7 @@
 #include "include/core/SkPathMeasure.h"
 #include "include/pathops/SkPathOps.h"
 #include "include/core/SkStrokeRec.h"
+#include "include/utils/SkParsePath.h"
 
 #ifndef _MSC_VER
 #pragma clang diagnostic pop
