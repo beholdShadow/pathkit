@@ -545,6 +545,45 @@ public:
         this->arcTo(p1.fX, p1.fY, p2.fX, p2.fY, radius);
     }
 
+    /** \enum SkPath::ArcSize
+        Four oval parts with radii (rx, ry) start at last SkPath SkPoint and ends at (x, y).
+        ArcSize and Direction select one of the four oval parts.
+    */
+    enum ArcSize {
+        kSmall_ArcSize, //!< smaller of arc pair
+        kLarge_ArcSize, //!< larger of arc pair
+    };
+
+    /** Appends arc to SkPath. Arc is implemented by one or more conics weighted to
+        describe part of oval with radii (rx, ry) rotated by xAxisRotate degrees. Arc
+        curves from last SkPath SkPoint to (x, y), choosing one of four possible routes:
+        clockwise or counterclockwise, and smaller or larger.
+
+        Arc sweep is always less than 360 degrees. arcTo() appends line to (x, y) if
+        either radii are zero, or if last SkPath SkPoint equals (x, y). arcTo() scales radii
+        (rx, ry) to fit last SkPath SkPoint and (x, y) if both are greater than zero but
+        too small.
+
+        arcTo() appends up to four conic curves.
+        arcTo() implements the functionality of SVG arc, although SVG sweep-flag value
+        is opposite the integer value of sweep; SVG sweep-flag uses 1 for clockwise,
+        while kCW_Direction cast to int is zero.
+
+        @param rx           radius on x-axis before x-axis rotation
+        @param ry           radius on y-axis before x-axis rotation
+        @param xAxisRotate  x-axis rotation in degrees; positive values are clockwise
+        @param largeArc     chooses smaller or larger arc
+        @param sweep        chooses clockwise or counterclockwise arc
+        @param x            end of arc
+        @param y            end of arc
+        @return             reference to SkPath
+    */
+    SkPath& arcTo(SkScalar rx, SkScalar ry, SkScalar xAxisRotate, ArcSize largeArc,
+                  SkPathDirection sweep, SkScalar x, SkScalar y);
+    SkPath& arcTo(const SkPoint r, SkScalar xAxisRotate, ArcSize largeArc, SkPathDirection sweep,
+               const SkPoint xy) {
+        return this->arcTo(r.fX, r.fY, xAxisRotate, largeArc, sweep, xy.fX, xy.fY);
+    }
     /** Appends kClose_Verb to SkPath. A closed contour connects the first and last SkPoint
         with line, forming a continuous loop. Open and closed contour draw the same
         with SkPaint::kFill_Style. With SkPaint::kStroke_Style, open contour draws

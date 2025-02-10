@@ -849,6 +849,141 @@ void SkPath::arcTo(SkScalar x1, SkScalar y1, SkScalar x2, SkScalar y2, SkScalar 
     this->conicTo(x1, y1, x1 + after.fX, y1 + after.fY, weight);
 }
 
+// This converts the SVG arc to conics.
+// Partly adapted from Niko's code in kdelibs/kdecore/svgicons.
+// Then transcribed from webkit/chrome's SVGPathNormalizer::decomposeArcToCubic()
+// See also SVG implementation notes:
+// http://www.w3.org/TR/SVG/implnote.html#ArcConversionEndpointToCenter
+// Note that arcSweep bool value is flipped from the original implementation.
+SkPath& SkPath::arcTo(SkScalar rx, SkScalar ry, SkScalar angle, SkPath::ArcSize arcLarge,
+                      SkPathDirection arcSweep, SkScalar x, SkScalar y) {
+    this->injectMoveToIfNeeded();
+    SkPoint srcPts[2];
+    this->getLastPt(&srcPts[0]);
+    // If rx = 0 or ry = 0 then this arc is treated as a straight line segment (a "lineto")
+    // joining the endpoints.
+    // http://www.w3.org/TR/SVG/implnote.html#ArcOutOfRangeParameters
+    if (!rx || !ry) {
+        return this->lineTo(x, y);
+    }
+    // If the current point and target point for the arc are identical, it should be treated as a
+    // zero length path. This ensures continuity in animations.
+    srcPts[1].set(x, y);
+    if (srcPts[0] == srcPts[1]) {
+        return this->lineTo(x, y);
+    }
+    rx = PkScalarAbs(rx);
+    ry = PkScalarAbs(ry);
+    SkVector midPointDistance = srcPts[0] - srcPts[1];
+    midPointDistance *= 0.5f;
+
+    SkMatrix pointTransform;
+    pointTransform.setRotate(-angle);
+
+    SkPoint transformedMidPoint;
+    pointTransform.mapPoints(&transformedMidPoint, &midPointDistance, 1);
+    SkScalar squareRx = rx * rx;
+    SkScalar squareRy = ry * ry;
+    SkScalar squareX = transformedMidPoint.fX * transformedMidPoint.fX;
+    SkScalar squareY = transformedMidPoint.fY * transformedMidPoint.fY;
+
+    // Check if the radii are big enough to draw the arc, scale radii if not.
+    // http://www.w3.org/TR/SVG/implnote.html#ArcCorrectionOutOfRangeRadii
+    SkScalar radiiScale = squareX / squareRx + squareY / squareRy;
+    if (radiiScale > 1) {
+        radiiScale = PkScalarSqrt(radiiScale);
+        rx *= radiiScale;
+        ry *= radiiScale;
+    }
+
+    pointTransform.setScale(1 / rx, 1 / ry);
+    pointTransform.preRotate(-angle);
+
+    SkPoint unitPts[2];
+    pointTransform.mapPoints(unitPts, srcPts, (int) std::size(unitPts));
+    SkVector delta = unitPts[1] - unitPts[0];
+
+    SkScalar d = delta.fX * delta.fX + delta.fY * delta.fY;
+    SkScalar scaleFactorSquared = std::max(1 / d - 0.25f, 0.f);
+
+    SkScalar scaleFactor = PkScalarSqrt(scaleFactorSquared);
+    if ((arcSweep == SkPathDirection::kCCW) != SkToBool(arcLarge)) {  // flipped from the original implementation
+        scaleFactor = -scaleFactor;
+    }
+    delta.scale(scaleFactor);
+    SkPoint centerPoint = unitPts[0] + unitPts[1];
+    centerPoint *= 0.5f;
+    centerPoint.offset(-delta.fY, delta.fX);
+    unitPts[0] -= centerPoint;
+    unitPts[1] -= centerPoint;
+    SkScalar theta1 = PkScalarATan2(unitPts[0].fY, unitPts[0].fX);
+    SkScalar theta2 = PkScalarATan2(unitPts[1].fY, unitPts[1].fX);
+    SkScalar thetaArc = theta2 - theta1;
+    if (thetaArc < 0 && (arcSweep == SkPathDirection::kCW)) {  // arcSweep flipped from the original implementation
+        thetaArc += PK_ScalarPI * 2;
+    } else if (thetaArc > 0 && (arcSweep != SkPathDirection::kCW)) {  // arcSweep flipped from the original implementation
+        thetaArc -= PK_ScalarPI * 2;
+    }
+
+    // Very tiny angles cause our subsequent math to go wonky (skbug.com/9272)
+    // so we do a quick check here. The precise tolerance amount is just made up.
+    // PI/million happens to fix the bug in 9272, but a larger value is probably
+    // ok too.
+    if (PkScalarAbs(thetaArc) < (PK_ScalarPI / (1000 * 1000))) {
+        return this->lineTo(x, y);
+    }
+
+    pointTransform.setRotate(angle);
+    pointTransform.preScale(rx, ry);
+
+    // the arc may be slightly bigger than 1/4 circle, so allow up to 1/3rd
+    int segments = PkScalarCeilToInt(PkScalarAbs(thetaArc / (2 * PK_ScalarPI / 3)));
+    SkScalar thetaWidth = thetaArc / segments;
+    SkScalar t = PkScalarTan(0.5f * thetaWidth);
+    if (!SkScalarIsFinite(t)) {
+        return *this;
+    }
+    SkScalar startTheta = theta1;
+    SkScalar w = PkScalarSqrt(PK_ScalarHalf + PkScalarCos(thetaWidth) * PK_ScalarHalf);
+    auto scalar_is_integer = [](SkScalar scalar) -> bool {
+        return scalar == PkScalarFloorToScalar(scalar);
+    };
+    bool expectIntegers = SkScalarNearlyZero(PK_ScalarPI/2 - PkScalarAbs(thetaWidth)) &&
+        scalar_is_integer(rx) && scalar_is_integer(ry) &&
+        scalar_is_integer(x) && scalar_is_integer(y);
+
+    for (int i = 0; i < segments; ++i) {
+        SkScalar endTheta    = startTheta + thetaWidth,
+                 sinEndTheta = SkScalarSinSnapToZero(endTheta),
+                 cosEndTheta = SkScalarCosSnapToZero(endTheta);
+
+        unitPts[1].set(cosEndTheta, sinEndTheta);
+        unitPts[1] += centerPoint;
+        unitPts[0] = unitPts[1];
+        unitPts[0].offset(t * sinEndTheta, -t * cosEndTheta);
+        SkPoint mapped[2];
+        pointTransform.mapPoints(mapped, unitPts, (int) std::size(unitPts));
+        /*
+        Computing the arc width introduces rounding errors that cause arcs to start
+        outside their marks. A round rect may lose convexity as a result. If the input
+        values are on integers, place the conic on integers as well.
+         */
+        if (expectIntegers) {
+            for (SkPoint& point : mapped) {
+                point.fX = PkScalarRoundToScalar(point.fX);
+                point.fY = PkScalarRoundToScalar(point.fY);
+            }
+        }
+        this->conicTo(mapped[0], mapped[1], w);
+        startTheta = endTheta;
+    }
+
+    // The final point should match the input point (by definition); replace it to
+    // ensure that rounding errors in the above math don't cause any problems.
+    this->setLastPt(x, y);
+    return *this;
+}
+
 SkPath& SkPath::addPath(const SkPath& path, SkScalar dx, SkScalar dy, AddPathMode mode) {
   SkMatrix matrix;
 
